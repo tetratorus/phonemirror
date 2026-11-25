@@ -5,7 +5,8 @@ let package = Package(
   name: "phonemirror",
   platforms: [.macOS(.v14)],
   dependencies: [
-    .package(path: "../lightpinky"),
+    .package(url: "https://github.com/tetratorus/lightpinky.git",
+             revision: "8dceaccee80c1370f26b36aaec3e97b394d0b9eb"),
   ],
   targets: [
     .executableTarget(
