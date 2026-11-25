@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private var statusLabel: NSTextField!
   private var streamRunning = false
   private var locked = false
+  private var statusHoldUntil = 0.0
   private var zoom: CGFloat = max(0.4, min(2.5, CGFloat(UserDefaults.standard.double(forKey: "zoom")).nonZero ?? 1))
 
   override init() {
@@ -178,12 +179,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
   // MARK: Input
 
-  private func setStatus(_ text: String) {
-    DispatchQueue.main.async { [weak self] in self?.statusLabel.stringValue = text }
+  private func setStatus(_ text: String, hold: Double = 0) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.statusHoldUntil = hold > 0 ? ProcessInfo.processInfo.systemUptime + hold : 0
+      self.statusLabel.stringValue = text
+    }
   }
 
   private func perform(_ what: String, _ work: @escaping (PhoneLink) throws -> Void) {
-    session.perform(work) { [weak self] err in self?.setStatus("\(what): \(err)") }
+    session.perform(work) { [weak self] err in self?.setStatus("\(what): \(err)", hold: 6) }
   }
 
   private func wireInput() {
@@ -257,8 +262,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
   @objc private func unlock() {
     resume()
-    setStatus("Unlocking…")
-    perform("Unlock") { try $0.unlock() }
+    setStatus("Unlocking…", hold: 15)
+    perform("Unlock") { [weak self] link in
+      try link.unlock()
+      self?.setStatus("Unlocked", hold: 1.5)
+    }
   }
 
   @objc private func reconnect() {
@@ -308,6 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               DispatchQueue.main.async {
                 if self.mirrorView.update(frame: image, orientation: shownOrientation) { self.fitWindow() }
                 if self.mirrorView.paused { return }
+                if ProcessInfo.processInfo.systemUptime < self.statusHoldUntil { return }
                 self.statusLabel.stringValue = shownLocked
                   ? "Locked · ⌘U to unlock" : String(format: "%.0f fps", shownFPS)
               }
