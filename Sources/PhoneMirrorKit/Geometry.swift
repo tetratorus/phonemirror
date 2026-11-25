@@ -10,9 +10,11 @@ public enum Geometry {
                   width: size.width, height: size.height)
   }
 
-  /// A point in `displayed` (y-down) as a whole pixel of a `screen`-sized image, clamped inside it.
-  public static func pixel(_ point: CGPoint, displayed: CGRect, screen: CGSize) -> CGPoint? {
+  /// A point in `displayed` (y-down) as a whole pixel of a `screen`-sized image. Points outside
+  /// `displayed` are clamped to its edge, or nil when `clamped` is false.
+  public static func pixel(_ point: CGPoint, displayed: CGRect, screen: CGSize, clamped: Bool = true) -> CGPoint? {
     guard screen.width > 0, screen.height > 0, displayed.width > 0, displayed.height > 0 else { return nil }
+    guard clamped || displayed.contains(point) else { return nil }
     let nx = min(1, max(0, (point.x - displayed.minX) / displayed.width))
     let ny = min(1, max(0, (point.y - displayed.minY) / displayed.height))
     return CGPoint(x: (nx * (screen.width - 1)).rounded(), y: (ny * (screen.height - 1)).rounded())

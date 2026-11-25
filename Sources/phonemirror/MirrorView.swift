@@ -92,12 +92,13 @@ final class MirrorView: NSView {
 
   private func displayedRect() -> CGRect { Geometry.aspectFit(screenSize, in: bounds) }
 
-  private func phonePoint(_ event: NSEvent) -> CGPoint? {
-    phonePoint(convert(event.locationInWindow, from: nil))
+  /// Input that starts a touch must land on the screen; a finger already down follows to the edge.
+  private func phonePoint(_ event: NSEvent, clamped: Bool = false) -> CGPoint? {
+    phonePoint(convert(event.locationInWindow, from: nil), clamped: clamped)
   }
 
-  private func phonePoint(_ viewPoint: CGPoint) -> CGPoint? {
-    Geometry.pixel(viewPoint, displayed: displayedRect(), screen: screenSize)
+  private func phonePoint(_ viewPoint: CGPoint, clamped: Bool = false) -> CGPoint? {
+    Geometry.pixel(viewPoint, displayed: displayedRect(), screen: screenSize, clamped: clamped)
   }
 
   // MARK: Pointer
@@ -112,7 +113,7 @@ final class MirrorView: NSView {
   }
 
   override func mouseDragged(with event: NSEvent) {
-    guard isDragging, event.timestamp - lastDragSentAt >= 0.016, let p = phonePoint(event) else { return }
+    guard isDragging, event.timestamp - lastDragSentAt >= 0.016, let p = phonePoint(event, clamped: true) else { return }
     lastDragSentAt = event.timestamp
     onTouch?(p, true)
   }
@@ -120,7 +121,7 @@ final class MirrorView: NSView {
   override func mouseUp(with event: NSEvent) {
     guard isDragging else { return }
     isDragging = false
-    guard let p = phonePoint(event) else { return }
+    guard let p = phonePoint(event, clamped: true) else { return }
     onTouch?(p, false)
   }
 
@@ -130,7 +131,9 @@ final class MirrorView: NSView {
 
   override func scrollWheel(with event: NSEvent) {
     // The phone adds its own momentum when the finger lifts mid-motion.
-    guard event.momentumPhase.isEmpty, !paused, let point = phonePoint(event) else { return }
+    guard event.momentumPhase.isEmpty, !paused else { return }
+    // Only a scroll that starts over the screen touches down; one under way may leave it.
+    let point = phonePoint(event)
     if scroll?.screen != screenSize { scroll = ScrollDrag(screen: screenSize) }
     let shown = displayedRect()
     guard shown.width > 0 else { return }
@@ -140,13 +143,13 @@ final class MirrorView: NSView {
     let dy = event.scrollingDeltaY * lines * perPoint
 
     if event.phase.contains(.began) {
-      send(scroll!.begin(at: point))
+      if let point { send(scroll!.begin(at: point)) } else { send(scroll!.end()) }
     } else if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
       send(scroll!.end())
       return
     } else if event.phase.isEmpty {
       // A mouse wheel has no phases: a pause ends the drag.
-      if !scroll!.isTracking { send(scroll!.begin(at: point)) }
+      if !scroll!.isTracking, let point { send(scroll!.begin(at: point)) }
       wheelTimer?.invalidate()
       wheelTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
         guard let self, self.scroll != nil else { return }

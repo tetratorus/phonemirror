@@ -59,6 +59,8 @@ final class GeometryTests: XCTestCase {
     let screen = CGSize(width: 1000, height: 2000)
     XCTAssertEqual(Geometry.pixel(CGPoint(x: 100, y: 0), displayed: shown, screen: screen), CGPoint(x: 0, y: 0))
     XCTAssertEqual(Geometry.pixel(CGPoint(x: 400, y: 500), displayed: shown, screen: screen), CGPoint(x: 999, y: 1999))
+    XCTAssertNil(Geometry.pixel(CGPoint(x: 50, y: 100), displayed: shown, screen: screen, clamped: false))
+    XCTAssertEqual(Geometry.pixel(CGPoint(x: 150, y: 100), displayed: shown, screen: screen, clamped: false), CGPoint(x: 250, y: 500))
   }
 
   func testPointSizes() {

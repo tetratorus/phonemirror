@@ -92,9 +92,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     window.titleVisibility = .hidden
     window.titlebarAppearsTransparent = true
     window.backgroundColor = .black
+    window.appearance = NSAppearance(named: .darkAqua)
     window.delegate = self
     window.contentAspectRatio = rect.size
     window.setFrameAutosaveName("PhoneMirror")
+    // Like iPhone Mirroring, the window keeps the phone's size and shape; no full screen.
+    window.collectionBehavior.insert(.fullScreenNone)
 
     statusLabel = NSTextField(labelWithString: "Connecting…")
     statusLabel.font = .systemFont(ofSize: 11)
@@ -137,13 +140,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     return screen.width > 0 ? Geometry.points(forPixels: screen) : CGSize(width: 402, height: 874)
   }
 
-  /// Sizes the window to the phone's point size times `zoom`, keeping its top-left corner.
+  /// Sizes the window to the phone's point size times `zoom`, keeping its top-left corner,
+  /// shrunk and moved as needed to stay on the screen.
   private func fitWindow() {
     let points = actualPoints
-    let size = NSSize(width: (points.width * zoom).rounded(), height: (points.height * zoom).rounded())
+    var size = NSSize(width: points.width * zoom, height: points.height * zoom)
     window.contentAspectRatio = points
-    var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+    let chrome = window.frameRect(forContentRect: .zero).size
+    if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+      let fit = min(1, (visible.width - chrome.width) / size.width, (visible.height - chrome.height) / size.height)
+      size = NSSize(width: size.width * fit, height: size.height * fit)
+    }
+    var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: size.width.rounded(), height: size.height.rounded())))
     frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+    if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+      frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+      frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+    }
     window.setFrame(frame, display: true, animate: false)
   }
 
