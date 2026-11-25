@@ -6,10 +6,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private let session: PhoneSession
   private var window: NSWindow!
   private var mirrorView: MirrorView!
+  private var statusDot: NSView!
   private var statusLabel: NSTextField!
+  private var healthTimer: Timer?
   private var streamRunning = false
   private var locked = false
-  private var statusHoldUntil = 0.0
+  private var lastFrameAt = 0.0
+  private var lastFPS = 0.0
+  private var activeOp: (label: String, startedAt: Double)?
+  private var errorBanner: (text: String, until: Double)?
   private var zoom: CGFloat = max(0.4, min(2.5, CGFloat(UserDefaults.standard.double(forKey: "zoom")).nonZero ?? 1))
 
   override init() {
@@ -31,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
   func applicationWillTerminate(_ notification: Notification) {
+    healthTimer?.invalidate()
     streamRunning = false
     session.shutdown()
   }
@@ -71,7 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     submenu("iPhone", [
       item("Unlock", #selector(unlock), "u"),
       item("Lock", #selector(pressLock), "l"),
+      .separator(),
       item("Reconnect", #selector(reconnect), "r", [.command, .shift]),
+      item("Hard Reset Tunnel…", #selector(hardResetTunnel), "r", [.command, .shift, .option]),
     ])
     submenu("Window", [
       item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", target: NSNull()),
@@ -100,6 +108,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Like iPhone Mirroring, the window keeps the phone's size and shape; no full screen.
     window.collectionBehavior.insert(.fullScreenNone)
 
+    statusDot = NSView(frame: NSRect(x: 0, y: 0, width: 7, height: 7))
+    statusDot.wantsLayer = true
+    statusDot.layer?.cornerRadius = 3.5
+    statusDot.layer?.backgroundColor = NSColor.systemYellow.cgColor
+    statusDot.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      statusDot.widthAnchor.constraint(equalToConstant: 7),
+      statusDot.heightAnchor.constraint(equalToConstant: 7),
+    ])
+
     statusLabel = NSTextField(labelWithString: "Connecting…")
     statusLabel.font = .systemFont(ofSize: 11)
     statusLabel.textColor = .secondaryLabelColor
@@ -113,19 +131,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       button.contentTintColor = .secondaryLabelColor
       return button
     }
+    let statusGroup = NSStackView(views: [statusDot, statusLabel])
+    statusGroup.spacing = 5
+    statusGroup.alignment = .centerY
     let bar = NSStackView(views: [
-      statusLabel,
+      statusGroup,
       button("house", "Home Screen (⌘1)", #selector(pressHome)),
       button("square.stack", "App Switcher (⌘2)", #selector(appSwitcher)),
       button("magnifyingglass", "Spotlight (⌘3)", #selector(spotlight)),
     ])
     bar.spacing = 10
     bar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 10)
-    bar.frame = NSRect(x: 0, y: 0, width: 260, height: 28)
+    bar.frame = NSRect(x: 0, y: 0, width: 290, height: 28)
     let accessory = NSTitlebarAccessoryViewController()
     accessory.view = bar
     accessory.layoutAttribute = .trailing
     window.addTitlebarAccessoryViewController(accessory)
+
+    healthTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+      self?.refreshStatusUI()
+    }
 
     mirrorView = MirrorView(frame: NSRect(origin: .zero, size: rect.size))
     mirrorView.autoresizingMask = [.width, .height]
@@ -179,16 +204,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
   // MARK: Input
 
-  private func setStatus(_ text: String, hold: Double = 0) {
+  private func showError(_ text: String, hold: Double = 10) {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      self.statusHoldUntil = hold > 0 ? ProcessInfo.processInfo.systemUptime + hold : 0
-      self.statusLabel.stringValue = text
+      self.activeOp = nil
+      self.errorBanner = (text, ProcessInfo.processInfo.systemUptime + hold)
+      self.refreshStatusUI()
     }
   }
 
+  private func beginOp(_ label: String) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.errorBanner = nil
+      self.activeOp = (label, ProcessInfo.processInfo.systemUptime)
+      self.refreshStatusUI()
+    }
+  }
+
+  private func endOp() {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.activeOp = nil
+      self.refreshStatusUI()
+    }
+  }
+
+  private func refreshStatusUI() {
+    let now = ProcessInfo.processInfo.systemUptime
+    let color: NSColor
+    let text: String
+    let tip: String
+
+    if let op = activeOp {
+      let elapsed = Int((now - op.startedAt).rounded(.down))
+      color = .systemYellow
+      text = elapsed >= 1 ? "\(op.label) \(elapsed)s" : op.label
+      tip = "\(op.label) (running for \(elapsed)s)"
+    } else if let err = errorBanner, now < err.until {
+      color = .systemRed
+      text = err.text
+      tip = "\(err.text)\nTip: ⇧⌘R Reconnect · ⌥⇧⌘R Hard Reset Tunnel"
+    } else if mirrorView.paused {
+      color = .systemGray
+      text = "Locked · ⌘U to unlock"
+      tip = "Display stream paused so the phone can sleep. Click to wake, ⌘U to unlock."
+    } else if lastFrameAt == 0 {
+      color = .systemYellow
+      text = "Connecting…"
+      tip = "Waiting for first video frame from CoreDevice."
+    } else {
+      let age = now - lastFrameAt
+      if age >= 8 {
+        color = .systemRed
+        text = String(format: "Stalled %.0fs · ⌥⇧⌘R", age)
+        tip = String(format: "No video frame for %.1fs. Try ⇧⌘R (Reconnect) or ⌥⇧⌘R (Hard Reset Tunnel).", age)
+      } else if age >= 2 {
+        color = .systemYellow
+        text = String(format: "Stalled %.0fs · ⇧⌘R", age)
+        tip = String(format: "No video frame for %.1fs. Waiting for stream or press ⇧⌘R to reconnect.", age)
+      } else if locked {
+        color = .systemGreen
+        text = String(format: "Locked · %.0f fps · ⌘U", lastFPS)
+        tip = String(format: "Stream live (%.1f fps). Press ⌘U to unlock, or Return + type passcode.", lastFPS)
+      } else {
+        color = .systemGreen
+        text = String(format: "%.0f fps", lastFPS)
+        tip = String(format: "Stream live (%.1f fps).", lastFPS)
+      }
+    }
+
+    statusDot.layer?.backgroundColor = color.cgColor
+    statusDot.toolTip = tip
+    statusLabel.stringValue = text
+    statusLabel.toolTip = tip
+    statusLabel.textColor = color == .systemRed ? .systemRed : .secondaryLabelColor
+  }
+
   private func perform(_ what: String, _ work: @escaping (PhoneLink) throws -> Void) {
-    session.perform(work) { [weak self] err in self?.setStatus("\(what): \(err)", hold: 6) }
+    session.perform(work) { [weak self] err in self?.showError("\(what): \(err)") }
   }
 
   private func wireInput() {
@@ -253,25 +347,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   @objc private func pressLock() {
     // The video stream wakes the display, so stop reading frames until asked.
     mirrorView.paused = true
-    setStatus("Locking…")
+    beginOp("Locking…")
     perform("Lock") { [weak self] link in
       try link.lock()
-      self?.setStatus("Locked · click to wake, ⌘U to unlock")
+      self?.endOp()
     }
   }
 
   @objc private func unlock() {
     resume()
-    setStatus("Unlocking…", hold: 15)
+    beginOp("Unlocking…")
     perform("Unlock") { [weak self] link in
       try link.unlock()
-      self?.setStatus("Unlocked", hold: 1.5)
+      self?.endOp()
     }
   }
 
   @objc private func reconnect() {
+    beginOp("Reconnecting…")
     session.reset()
     resume()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+      self?.lastFrameAt = 0
+      self?.endOp()
+    }
+  }
+
+  @objc private func hardResetTunnel() {
+    mirrorView.paused = true
+    beginOp("Resetting tunnel…")
+    session.reset()
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      // Clear cached lightpinky port/layout files so the next tunnel rediscovers cleanly.
+      let runDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".cache/lightpinky/run")
+      if let entries = try? FileManager.default.contentsOfDirectory(at: runDir, includingPropertiesForKeys: nil) {
+        for url in entries where url.lastPathComponent.hasPrefix("layout-") || url.lastPathComponent.hasPrefix("ports-") {
+          try? FileManager.default.removeItem(at: url)
+        }
+      }
+      let proc = Process()
+      let errPipe = Pipe()
+      proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+      proc.arguments = [
+        "-e",
+        "do shell script \"killall -9 remoted CoreDeviceService 2>/dev/null || true\" with administrator privileges",
+      ]
+      proc.standardError = errPipe
+      do {
+        try proc.run()
+        proc.waitUntilExit()
+        if proc.terminationStatus != 0 {
+          let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "canceled"
+          self?.showError("Reset failed: \(msg)")
+          DispatchQueue.main.async { self?.resume() }
+          return
+        }
+      } catch {
+        self?.showError("Reset failed: \(error.localizedDescription)")
+        DispatchQueue.main.async { self?.resume() }
+        return
+      }
+      Thread.sleep(forTimeInterval: 1.5)
+      DispatchQueue.main.async {
+        self?.lastFrameAt = 0
+        self?.resume()
+        self?.endOp()
+      }
+    }
   }
 
   private func resume() { mirrorView.paused = false }
@@ -315,15 +459,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let shownOrientation = orientation, shownLocked = locked, shownFPS = fps
               DispatchQueue.main.async {
                 if self.mirrorView.update(frame: image, orientation: shownOrientation) { self.fitWindow() }
-                if self.mirrorView.paused { return }
-                if ProcessInfo.processInfo.systemUptime < self.statusHoldUntil { return }
-                self.statusLabel.stringValue = shownLocked
-                  ? "Locked · ⌘U to unlock" : String(format: "%.0f fps", shownFPS)
+                self.locked = shownLocked
+                self.lastFPS = shownFPS
+                self.lastFrameAt = ProcessInfo.processInfo.systemUptime
+                self.refreshStatusUI()
               }
             }
             Thread.sleep(forTimeInterval: 0.012)
           } catch {
-            self.setStatus("Waiting: \(error.localizedDescription)")
+            self.showError("Waiting: \(error.localizedDescription)", hold: 4)
             self.session.reset()
             Thread.sleep(forTimeInterval: 1)
           }
