@@ -50,8 +50,34 @@ final class LightpinkyLink: PhoneLink {
   func pasteboardText() throws -> String? { try phone.pasteboardText() }
   func openURL(_ url: String) throws { try phone.openURL(url) }
   func lock() throws { try phone.lock() }
-  func unlock() throws { try phone.unlock() }
+  func unlock() throws {
+    Self.loadUnlockCodeIfNeeded()
+    try phone.unlock()
+  }
   func close() { phone.endDisplaySession() }
+
+  private static func loadUnlockCodeIfNeeded() {
+    if let existing = ProcessInfo.processInfo.environment["IPHONE_UNLOCK_CODE"], !existing.isEmpty {
+      return
+    }
+    guard FileManager.default.isExecutableFile(atPath: "/bin/zsh") else { return }
+    let proc = Process()
+    let pipe = Pipe()
+    proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    proc.arguments = [
+      "-c",
+      "set +x; if [ -f \"$HOME/.zshrc\" ]; then source \"$HOME/.zshrc\" >/dev/null 2>&1; fi; printf '%s' \"$IPHONE_UNLOCK_CODE\"",
+    ]
+    proc.standardOutput = pipe
+    proc.standardError = FileHandle.nullDevice
+    guard (try? proc.run()) != nil else { return }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    proc.waitUntilExit()
+    guard proc.terminationStatus == 0,
+          let code = String(data: data, encoding: .utf8),
+          !code.isEmpty else { return }
+    setenv("IPHONE_UNLOCK_CODE", code, 1)
+  }
 }
 
 /// Shows a still image instead of a phone and logs input to stderr, for

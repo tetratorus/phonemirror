@@ -3,6 +3,13 @@
 A native macOS window that mirrors and controls a paired physical iPhone through [LightpinkyCore](https://github.com/tetratorus/lightpinky). Needs an Apple silicon Mac with full Xcode, and an iPhone already paired with it.
 
 ```sh
+./install.sh          # builds and installs ~/Applications/PhoneMirror.app
+open ~/Applications/PhoneMirror.app
+```
+
+Or run directly from the terminal:
+
+```sh
 swift build -c release && .build/release/phonemirror
 ```
 
