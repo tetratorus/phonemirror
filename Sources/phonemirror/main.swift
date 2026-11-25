@@ -1,301 +1,29 @@
 import AppKit
-import CoreGraphics
 import Foundation
-import LightpinkyCore
-import QuartzCore
-
-// MARK: - Direct LightpinkyCore session (zero JPEG, zero JSON)
-
-final class DirectPhoneSession {
-  private let queue = DispatchQueue(label: "phonemirror.phone", qos: .userInteractive)
-  private let stateLock = NSLock()
-  private var phone: Phone?
-  private var pendingInputs = 0
-  private var stopped = false
-
-  var hasPendingInput: Bool {
-    stateLock.lock()
-    defer { stateLock.unlock() }
-    return pendingInputs > 0
-  }
-
-  private func isStopped() -> Bool {
-    stateLock.lock()
-    defer { stateLock.unlock() }
-    return stopped
-  }
-
-  private func ensurePhoneLocked() throws -> Phone {
-    if let phone { return phone }
-    let devices = try PhoneInfo.discover()
-    let wanted = ProcessInfo.processInfo.environment["LIGHTPINKY_DEVICE"]
-    let matches = wanted.map { id in
-      devices.filter { $0.id == id || $0.udid == id || $0.name == id }
-    } ?? devices
-    guard matches.count == 1 else {
-      throw PhoneError("Expected 1 paired iPhone, found \(matches.count)")
-    }
-    let connected = Phone(matches[0])
-    phone = connected
-    return connected
-  }
-
-  func nextFrame(wait: Double = 0.05) throws -> CGImage? {
-    if isStopped() { return nil }
-    return try queue.sync {
-      if isStopped() { return nil }
-      let p = try ensurePhoneLocked()
-      return try p.videoFrame(wait: wait, maxAge: 2)
-    }
-  }
-
-  func performInput(_ work: @escaping (Phone) throws -> Void, onError: ((String) -> Void)? = nil) {
-    stateLock.lock()
-    pendingInputs += 1
-    stateLock.unlock()
-    queue.async { [weak self] in
-      guard let self else { return }
-      defer {
-        self.stateLock.lock()
-        self.pendingInputs = max(0, self.pendingInputs - 1)
-        self.stateLock.unlock()
-      }
-      if self.isStopped() { return }
-      do {
-        let p = try self.ensurePhoneLocked()
-        try work(p)
-      } catch {
-        onError?(error.localizedDescription)
-      }
-    }
-  }
-
-  func resetConnection() {
-    queue.async { [weak self] in
-      self?.phone?.endDisplaySession()
-      self?.phone = nil
-    }
-  }
-
-  func shutdown() {
-    stateLock.lock()
-    stopped = true
-    stateLock.unlock()
-    queue.sync {
-      phone?.endDisplaySession()
-      phone = nil
-    }
-  }
-}
-
-// MARK: - Interactive Direct-Layer Mirror View
-
-final class MirrorView: NSView {
-  var onTouch: ((CGPoint, Bool) -> Void)?
-  var onLongPress: ((CGPoint) -> Void)?
-  var onSwipe: ((CGPoint, CGPoint, Double) -> Void)?
-  var onKey: ((String) -> Void)?
-  var onType: ((String) -> Void)?
-  var onHome: (() -> Void)?
-  var onLock: (() -> Void)?
-
-  private let imageLayer = CALayer()
-  private var screenSize: CGSize = .zero
-  private var isDragging = false
-  private var lastDragSentAt: TimeInterval = 0
-
-  private var pendingText = ""
-  private var textTimer: Timer?
-
-  private var pendingScrollDelta: CGFloat = 0
-  private var scrollOrigin: CGPoint = .zero
-  private var scrollTimer: Timer?
-
-  override var acceptsFirstResponder: Bool { true }
-  override var isFlipped: Bool { true }
-
-  override init(frame frameRect: NSRect) {
-    super.init(frame: frameRect)
-    wantsLayer = true
-    layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1).cgColor
-    imageLayer.contentsGravity = .resizeAspect
-    imageLayer.magnificationFilter = .linear
-    imageLayer.minificationFilter = .trilinear
-    layer?.addSublayer(imageLayer)
-  }
-
-  required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
-
-  override func layout() {
-    super.layout()
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    imageLayer.frame = bounds
-    CATransaction.commit()
-  }
-
-  func update(frame image: CGImage) {
-    screenSize = CGSize(width: image.width, height: image.height)
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    imageLayer.contents = image
-    CATransaction.commit()
-  }
-
-  private func displayedRect() -> CGRect {
-    guard screenSize.width > 0, screenSize.height > 0 else { return bounds }
-    let scale = min(bounds.width / screenSize.width, bounds.height / screenSize.height)
-    let w = screenSize.width * scale
-    let h = screenSize.height * scale
-    return CGRect(
-      x: (bounds.width - w) / 2,
-      y: (bounds.height - h) / 2,
-      width: w,
-      height: h
-    )
-  }
-
-  private func phonePoint(from viewPoint: CGPoint) -> CGPoint? {
-    guard screenSize.width > 0, screenSize.height > 0 else { return nil }
-    let rect = displayedRect()
-    guard rect.width > 0, rect.height > 0 else { return nil }
-    let nx = min(1, max(0, (viewPoint.x - rect.minX) / rect.width))
-    let ny = min(1, max(0, (viewPoint.y - rect.minY) / rect.height))
-    return CGPoint(
-      x: (nx * (screenSize.width - 1)).rounded(),
-      y: (ny * (screenSize.height - 1)).rounded()
-    )
-  }
-
-  override func mouseDown(with event: NSEvent) {
-    window?.makeFirstResponder(self)
-    let pt = convert(event.locationInWindow, from: nil)
-    guard let p = phonePoint(from: pt) else { return }
-    isDragging = true
-    lastDragSentAt = event.timestamp
-    onTouch?(p, true)
-  }
-
-  override func mouseDragged(with event: NSEvent) {
-    guard isDragging else { return }
-    // Throttle live touch move reports to ~60Hz
-    guard event.timestamp - lastDragSentAt >= 0.016 else { return }
-    let pt = convert(event.locationInWindow, from: nil)
-    guard let p = phonePoint(from: pt) else { return }
-    lastDragSentAt = event.timestamp
-    onTouch?(p, true)
-  }
-
-  override func mouseUp(with event: NSEvent) {
-    guard isDragging else { return }
-    isDragging = false
-    let pt = convert(event.locationInWindow, from: nil)
-    guard let p = phonePoint(from: pt) else { return }
-    onTouch?(p, false)
-  }
-
-  override func rightMouseUp(with event: NSEvent) {
-    let pt = convert(event.locationInWindow, from: nil)
-    if let p = phonePoint(from: pt) {
-      onLongPress?(p)
-    }
-  }
-
-  override func scrollWheel(with event: NSEvent) {
-    let pt = convert(event.locationInWindow, from: nil)
-    guard let origin = phonePoint(from: pt) else { return }
-    let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12
-    pendingScrollDelta += dy
-    scrollOrigin = origin
-    scrollTimer?.invalidate()
-    scrollTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
-      self?.flushScroll()
-    }
-  }
-
-  private func flushScroll() {
-    let delta = pendingScrollDelta
-    pendingScrollDelta = 0
-    guard abs(delta) > 6, screenSize.height > 0 else { return }
-    let travel = min(screenSize.height * 0.45, max(80, abs(delta) * 2.5))
-    let sign: CGFloat = delta > 0 ? 1 : -1
-    let y1 = min(screenSize.height - 40, max(40, scrollOrigin.y))
-    let y2 = min(screenSize.height - 40, max(40, y1 + sign * travel))
-    guard abs(y2 - y1) > 20 else { return }
-    onSwipe?(CGPoint(x: scrollOrigin.x, y: y1), CGPoint(x: scrollOrigin.x, y: y2), 0.22)
-  }
-
-  override func keyDown(with event: NSEvent) {
-    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-    if flags.contains(.command) {
-      switch event.charactersIgnoringModifiers?.lowercased() {
-      case "v":
-        if let str = NSPasteboard.general.string(forType: .string), !str.isEmpty {
-          flushText()
-          onType?(str)
-        }
-        return
-      case "h":
-        flushText()
-        onHome?()
-        return
-      case "l":
-        flushText()
-        onLock?()
-        return
-      case "q":
-        NSApp.terminate(nil)
-        return
-      default:
-        break
-      }
-    }
-
-    switch event.keyCode {
-    case 36, 76: flushText(); onKey?("enter"); return
-    case 51: flushText(); onKey?("delete"); return
-    case 117: flushText(); onKey?("forward_delete"); return
-    case 48: flushText(); onKey?("tab"); return
-    case 53: flushText(); onKey?("escape"); return
-    case 126: flushText(); onKey?("dpad_up"); return
-    case 125: flushText(); onKey?("dpad_down"); return
-    case 123: flushText(); onKey?("dpad_left"); return
-    case 124: flushText(); onKey?("dpad_right"); return
-    default: break
-    }
-
-    if !flags.contains(.command), !flags.contains(.control),
-       let chars = event.characters, !chars.isEmpty {
-      pendingText.append(chars)
-      textTimer?.invalidate()
-      textTimer = Timer.scheduledTimer(withTimeInterval: 0.16, repeats: false) { [weak self] _ in
-        self?.flushText()
-      }
-    }
-  }
-
-  private func flushText() {
-    textTimer?.invalidate()
-    textTimer = nil
-    guard !pendingText.isEmpty else { return }
-    let text = pendingText
-    pendingText = ""
-    onType?(text)
-  }
-}
-
-// MARK: - App Delegate
+import PhoneMirrorKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-  private let session = DirectPhoneSession()
+  private let session: PhoneSession
   private var window: NSWindow!
   private var mirrorView: MirrorView!
   private var statusLabel: NSTextField!
   private var streamRunning = false
-  private var hasSizedWindow = false
+  private var locked = false
+  private var zoom: CGFloat = max(0.4, min(2.5, CGFloat(UserDefaults.standard.double(forKey: "zoom")).nonZero ?? 1))
+
+  override init() {
+    let env = ProcessInfo.processInfo.environment
+    if let still = env["PHONEMIRROR_STILL"] {
+      let orientation = env["PHONEMIRROR_STILL_ORIENTATION"] ?? "rot0"
+      session = PhoneSession { try StillLink(path: still, orientation: orientation) }
+    } else {
+      session = PhoneSession { try LightpinkyLink() }
+    }
+  }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    setupUI()
+    NSApp.mainMenu = makeMenu()
+    setupWindow()
     startStreaming()
   }
 
@@ -306,149 +34,285 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     session.shutdown()
   }
 
-  private func setupUI() {
-    let initialRect = NSRect(x: 200, y: 120, width: 410, height: 860)
-    window = NSWindow(
-      contentRect: initialRect,
-      styleMask: [.titled, .closable, .miniaturizable, .resizable],
-      backing: .buffered,
-      defer: false
-    )
-    window.title = "PhoneMirror (Direct HEVC)"
+  // MARK: Menus
+
+  private func makeMenu() -> NSMenu {
+    let main = NSMenu()
+    func submenu(_ title: String, _ items: [NSMenuItem]) {
+      let holder = NSMenuItem()
+      let menu = NSMenu(title: title)
+      items.forEach(menu.addItem)
+      holder.submenu = menu
+      main.addItem(holder)
+    }
+    func item(_ title: String, _ action: Selector, _ key: String, _ mods: NSEvent.ModifierFlags = .command,
+              target: AnyObject? = nil) -> NSMenuItem {
+      let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+      item.keyEquivalentModifierMask = mods
+      item.target = target ?? self
+      return item
+    }
+    submenu("PhoneMirror", [
+      item("Hide PhoneMirror", #selector(NSApplication.hide(_:)), "h", target: NSApp),
+      .separator(),
+      item("Quit PhoneMirror", #selector(NSApplication.terminate(_:)), "q", target: NSApp),
+    ])
+    // No Edit menu: Command shortcuts other than these go to the phone.
+    submenu("View", [
+      item("Home Screen", #selector(pressHome), "1"),
+      item("App Switcher", #selector(appSwitcher), "2"),
+      item("Spotlight", #selector(spotlight), "3"),
+      .separator(),
+      item("Larger", #selector(larger), "="),
+      item("Actual Size", #selector(actualSize), "0"),
+      item("Smaller", #selector(smaller), "-"),
+    ])
+    submenu("iPhone", [
+      item("Unlock", #selector(unlock), "u"),
+      item("Lock", #selector(pressLock), "l"),
+      item("Reconnect", #selector(reconnect), "r", [.command, .shift]),
+    ])
+    submenu("Window", [
+      item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", target: NSNull()),
+      item("Close", #selector(NSWindow.performClose(_:)), "w", target: NSNull()),
+    ])
+    for menu in main.items.compactMap(\.submenu) {
+      for entry in menu.items where entry.target is NSNull { entry.target = nil }
+    }
+    return main
+  }
+
+  // MARK: Window
+
+  private func setupWindow() {
+    let rect = NSRect(x: 200, y: 120, width: 402, height: 874)
+    window = NSWindow(contentRect: rect, styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                      backing: .buffered, defer: false)
+    window.title = "iPhone"
+    window.titleVisibility = .hidden
+    window.titlebarAppearsTransparent = true
+    window.backgroundColor = .black
     window.delegate = self
-    window.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1)
+    window.contentAspectRatio = rect.size
+    window.setFrameAutosaveName("PhoneMirror")
 
-    let root = NSView(frame: initialRect)
-    root.autoresizingMask = [.width, .height]
-
-    let barHeight: CGFloat = 34
-    let bar = NSView(frame: NSRect(x: 0, y: 0, width: initialRect.width, height: barHeight))
-    bar.autoresizingMask = [.width, .maxYMargin]
-    bar.wantsLayer = true
-    bar.layer?.backgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1).cgColor
-
-    let homeBtn = NSButton(title: "Home", target: self, action: #selector(pressHome))
-    homeBtn.bezelStyle = .rounded
-    homeBtn.frame = NSRect(x: 8, y: 4, width: 62, height: 26)
-    bar.addSubview(homeBtn)
-
-    let lockBtn = NSButton(title: "Lock", target: self, action: #selector(pressLock))
-    lockBtn.bezelStyle = .rounded
-    lockBtn.frame = NSRect(x: 74, y: 4, width: 56, height: 26)
-    bar.addSubview(lockBtn)
-
-    statusLabel = NSTextField(labelWithString: "Connecting to iPhone...")
-    statusLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+    statusLabel = NSTextField(labelWithString: "Connecting…")
+    statusLabel.font = .systemFont(ofSize: 11)
     statusLabel.textColor = .secondaryLabelColor
     statusLabel.lineBreakMode = .byTruncatingTail
-    statusLabel.frame = NSRect(x: 138, y: 9, width: initialRect.width - 146, height: 16)
-    statusLabel.autoresizingMask = [.width]
-    bar.addSubview(statusLabel)
+    statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
+      let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
+      let button = NSButton(image: image, target: self, action: action)
+      button.isBordered = false
+      button.toolTip = tip
+      button.contentTintColor = .secondaryLabelColor
+      return button
+    }
+    let bar = NSStackView(views: [
+      statusLabel,
+      button("house", "Home Screen (⌘1)", #selector(pressHome)),
+      button("square.stack", "App Switcher (⌘2)", #selector(appSwitcher)),
+      button("magnifyingglass", "Spotlight (⌘3)", #selector(spotlight)),
+    ])
+    bar.spacing = 10
+    bar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 10)
+    bar.frame = NSRect(x: 0, y: 0, width: 260, height: 28)
+    let accessory = NSTitlebarAccessoryViewController()
+    accessory.view = bar
+    accessory.layoutAttribute = .trailing
+    window.addTitlebarAccessoryViewController(accessory)
 
-    mirrorView = MirrorView(frame: NSRect(x: 0, y: barHeight, width: initialRect.width, height: initialRect.height - barHeight))
+    mirrorView = MirrorView(frame: NSRect(origin: .zero, size: rect.size))
     mirrorView.autoresizingMask = [.width, .height]
-    mirrorView.onTouch = { [weak self] pt, down in
-      self?.session.performInput({ try $0.touch(x: pt.x, y: pt.y, down: down) }) { err in
-        self?.setStatus("Touch error: \(err)")
-      }
-    }
-    mirrorView.onLongPress = { [weak self] pt in
-      self?.session.performInput({ try $0.gesture(x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y, duration: 0.8) }) { err in
-        self?.setStatus("Long-press error: \(err)")
-      }
-    }
-    mirrorView.onSwipe = { [weak self] p1, p2, dur in
-      self?.session.performInput({ try $0.gesture(x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, duration: dur) }) { err in
-        self?.setStatus("Swipe error: \(err)")
-      }
-    }
-    mirrorView.onKey = { [weak self] key in
-      self?.session.performInput({ try $0.key(key) }) { err in
-        self?.setStatus("Key error: \(err)")
-      }
-    }
-    mirrorView.onType = { [weak self] text in
-      self?.session.performInput({ try $0.type(text, append: true, submit: false) }) { err in
-        self?.setStatus("Type error: \(err)")
-      }
-    }
-    mirrorView.onHome = { [weak self] in self?.pressHome() }
-    mirrorView.onLock = { [weak self] in self?.pressLock() }
-
-    root.addSubview(bar)
-    root.addSubview(mirrorView)
-    window.contentView = root
+    wireInput()
+    window.contentView = mirrorView
     window.makeKeyAndOrderFront(nil)
     window.makeFirstResponder(mirrorView)
     NSApp.activate(ignoringOtherApps: true)
   }
 
-  @objc private func pressHome() {
-    session.performInput({ try $0.key("home") }) { [weak self] err in
-      self?.setStatus("Home error: \(err)")
+  private var actualPoints: CGSize {
+    let screen = mirrorView.screenSize
+    return screen.width > 0 ? Geometry.points(forPixels: screen) : CGSize(width: 402, height: 874)
+  }
+
+  /// Sizes the window to the phone's point size times `zoom`, keeping its top-left corner.
+  private func fitWindow() {
+    let points = actualPoints
+    let size = NSSize(width: (points.width * zoom).rounded(), height: (points.height * zoom).rounded())
+    window.contentAspectRatio = points
+    var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+    frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+    window.setFrame(frame, display: true, animate: false)
+  }
+
+  private func setZoom(_ value: CGFloat) {
+    zoom = max(0.4, min(2.5, value))
+    UserDefaults.standard.set(Double(zoom), forKey: "zoom")
+    fitWindow()
+  }
+
+  @objc private func larger() { setZoom(zoom * 1.15) }
+  @objc private func smaller() { setZoom(zoom / 1.15) }
+  @objc private func actualSize() { setZoom(1) }
+
+  func windowDidEndLiveResize(_ notification: Notification) {
+    guard let content = window.contentView, actualPoints.width > 0 else { return }
+    zoom = content.bounds.width / actualPoints.width
+    UserDefaults.standard.set(Double(zoom), forKey: "zoom")
+  }
+
+  // MARK: Input
+
+  private func setStatus(_ text: String) {
+    DispatchQueue.main.async { [weak self] in self?.statusLabel.stringValue = text }
+  }
+
+  private func perform(_ what: String, _ work: @escaping (PhoneLink) throws -> Void) {
+    session.perform(work) { [weak self] err in self?.setStatus("\(what): \(err)") }
+  }
+
+  private func wireInput() {
+    mirrorView.onTouch = { [weak self] p, down in
+      self?.perform("Touch") { try $0.touch(x: p.x, y: p.y, down: down) }
+    }
+    mirrorView.onLongPress = { [weak self] p in
+      self?.perform("Long press") { try $0.gesture(x1: p.x, y1: p.y, x2: p.x, y2: p.y, duration: 0.8) }
+    }
+    mirrorView.onChord = { [weak self] chord in self?.perform("Key") { try $0.chord(chord) } }
+    mirrorView.onText = { [weak self] text in self?.perform("Type") { try $0.paste(text) } }
+    mirrorView.onPaste = { [weak self] in
+      if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
+        self?.perform("Paste") { try $0.paste(text) }
+      } else {
+        self?.perform("Paste") { try $0.chord([KeyMap.command, 0x19]) }
+      }
+    }
+    mirrorView.onCopy = { [weak self] chord in
+      self?.perform("Copy") { link in
+        try link.chord(chord)
+        Thread.sleep(forTimeInterval: 0.35)
+        guard let text = try link.pasteboardText(), !text.isEmpty else { return }
+        DispatchQueue.main.async {
+          NSPasteboard.general.clearContents()
+          NSPasteboard.general.setString(text, forType: .string)
+        }
+      }
+    }
+    mirrorView.onDropText = { [weak self] p, text in
+      self?.perform("Drop") { link in
+        try link.gesture(x1: p.x, y1: p.y, x2: p.x, y2: p.y, duration: 0.06)
+        Thread.sleep(forTimeInterval: 0.4)
+        try link.paste(text)
+      }
+    }
+    mirrorView.onDropURL = { [weak self] url in self?.perform("Open link") { try $0.openURL(url) } }
+    mirrorView.onClickWhilePaused = { [weak self] in self?.resume() }
+  }
+
+  @objc private func pressHome() { perform("Home") { try $0.home() } }
+
+  @objc private func appSwitcher() {
+    perform("App Switcher") { link in
+      try link.home()
+      Thread.sleep(forTimeInterval: 0.08)
+      try link.home()
+    }
+  }
+
+  @objc private func spotlight() {
+    let screen = mirrorView.screenSize
+    guard screen.height > 0 else { return }
+    perform("Spotlight") { link in
+      try link.home()
+      Thread.sleep(forTimeInterval: 0.6)
+      try link.gesture(x1: screen.width / 2, y1: screen.height * 0.35,
+                       x2: screen.width / 2, y2: screen.height * 0.6, duration: 0.3)
     }
   }
 
   @objc private func pressLock() {
-    session.performInput({ try $0.lock() }) { [weak self] err in
-      self?.setStatus("Lock error: \(err)")
+    // The video stream wakes the display, so stop reading frames until asked.
+    mirrorView.paused = true
+    setStatus("Locking…")
+    perform("Lock") { [weak self] link in
+      try link.lock()
+      self?.setStatus("Locked · click to wake, ⌘U to unlock")
     }
   }
 
-  private func setStatus(_ text: String) {
-    DispatchQueue.main.async { [weak self] in
-      self?.statusLabel.stringValue = text
-    }
+  @objc private func unlock() {
+    resume()
+    setStatus("Unlocking…")
+    perform("Unlock") { try $0.unlock() }
   }
+
+  @objc private func reconnect() {
+    session.reset()
+    resume()
+  }
+
+  private func resume() { mirrorView.paused = false }
+
+  // MARK: Stream
 
   private func startStreaming() {
     streamRunning = true
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       guard let self else { return }
-      var frameCount = 0
-      var fpsWindowStart = ProcessInfo.processInfo.systemUptime
-      var currentFPS = 0.0
+      var frames = 0
+      var windowStart = ProcessInfo.processInfo.systemUptime
+      var fps = 0.0
+      var lastStatus = 0.0
+      var orientation = Orientation.rot0
+      var locked = false
 
       while self.streamRunning {
-        if self.session.hasPendingInput {
-          Thread.sleep(forTimeInterval: 0.005)
+        if self.session.hasPendingInput || self.mirrorView.paused {
+          Thread.sleep(forTimeInterval: 0.01)
           continue
         }
         autoreleasepool {
           do {
-            if let image = try self.session.nextFrame(wait: 0.05) {
-              frameCount += 1
-              let now = ProcessInfo.processInfo.systemUptime
-              if now - fpsWindowStart >= 1.0 {
-                currentFPS = Double(frameCount) / (now - fpsWindowStart)
-                frameCount = 0
-                fpsWindowStart = now
-              }
-              DispatchQueue.main.async {
-                if !self.hasSizedWindow, image.width > 0, image.height > 0 {
-                  self.hasSizedWindow = true
-                  let targetWidth: CGFloat = 390
-                  let aspect = CGFloat(image.height) / CGFloat(image.width)
-                  let targetHeight = (targetWidth * aspect).rounded() + 34
-                  self.window.setContentSize(NSSize(width: targetWidth, height: targetHeight))
-                }
-                self.mirrorView.update(frame: image)
-                self.statusLabel.stringValue = String(
-                  format: "Live · %.0f fps · %dx%d",
-                  currentFPS, image.width, image.height
-                )
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastStatus >= 1 {
+              lastStatus = now
+              if let status = try? self.session.read({ try $0.status() }) {
+                orientation = Orientation(reported: status.orientation)
+                locked = status.locked
               }
             }
-            Thread.sleep(forTimeInterval: 0.014)
+            if let image = try self.session.read({ try $0.frame(wait: 0.05) }) {
+              frames += 1
+              let now = ProcessInfo.processInfo.systemUptime
+              if now - windowStart >= 1 {
+                fps = Double(frames) / (now - windowStart)
+                frames = 0
+                windowStart = now
+              }
+              let shownOrientation = orientation, shownLocked = locked, shownFPS = fps
+              DispatchQueue.main.async {
+                if self.mirrorView.update(frame: image, orientation: shownOrientation) { self.fitWindow() }
+                if self.mirrorView.paused { return }
+                self.statusLabel.stringValue = shownLocked
+                  ? "Locked · ⌘U to unlock" : String(format: "%.0f fps", shownFPS)
+              }
+            }
+            Thread.sleep(forTimeInterval: 0.012)
           } catch {
             self.setStatus("Waiting: \(error.localizedDescription)")
-            self.session.resetConnection()
-            Thread.sleep(forTimeInterval: 0.5)
+            self.session.reset()
+            Thread.sleep(forTimeInterval: 1)
           }
         }
       }
     }
   }
+}
+
+private extension CGFloat {
+  var nonZero: CGFloat? { self == 0 ? nil : self }
 }
 
 let app = NSApplication.shared

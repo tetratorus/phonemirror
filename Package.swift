@@ -6,12 +6,13 @@ let package = Package(
   platforms: [.macOS(.v14)],
   dependencies: [
     .package(url: "https://github.com/tetratorus/lightpinky.git",
-             revision: "8dceaccee80c1370f26b36aaec3e97b394d0b9eb"),
+             revision: "3568cd7b4f3877a6781817afb7c089ccbce3668d"),
   ],
   targets: [
+    .target(name: "PhoneMirrorKit"),
     .executableTarget(
       name: "phonemirror",
-      dependencies: [.product(name: "LightpinkyCore", package: "lightpinky")],
+      dependencies: ["PhoneMirrorKit", .product(name: "LightpinkyCore", package: "lightpinky")],
       linkerSettings: [
         .unsafeFlags([
           "-F/Library/Developer/PrivateFrameworks",
@@ -20,5 +21,6 @@ let package = Package(
         ]),
       ]
     ),
+    .testTarget(name: "PhoneMirrorKitTests", dependencies: ["PhoneMirrorKit"]),
   ]
 )
