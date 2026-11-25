@@ -26,7 +26,7 @@ swift build -c release && .build/release/phonemirror
 | Drop text / a link onto the window | Pastes the text / opens the link |
 | ⌘1, ⌘2, ⌘3 | Home Screen, App Switcher, Spotlight |
 | ⌘=, ⌘0, ⌘- | Larger, actual size, smaller window |
-| ⌘U, ⌘L, ⇧⌘R, ⌥⇧⌘R | Unlock (uses `IPHONE_UNLOCK_CODE`), lock, reconnect, hard reset tunnel |
+| ⌘U, ⌘L, ⇧⌘R | Unlock (uses `IPHONE_UNLOCK_CODE`), lock, reset tunnel |
 
 The window follows the phone's rotation and remembers its position.
 

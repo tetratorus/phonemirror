@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private var healthTimer: Timer?
   private var streamRunning = false
   private var locked = false
+  private var isResetting = false
   private var lastFrameAt = 0.0
   private var lastFPS = 0.0
   private var activeOp: (label: String, startedAt: Double)?
@@ -78,8 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       item("Unlock", #selector(unlock), "u"),
       item("Lock", #selector(pressLock), "l"),
       .separator(),
-      item("Reconnect", #selector(reconnect), "r", [.command, .shift]),
-      item("Hard Reset Tunnel…", #selector(hardResetTunnel), "r", [.command, .shift, .option]),
+      item("Reset Tunnel…", #selector(hardResetTunnel), "r", [.command, .shift]),
     ])
     submenu("Window", [
       item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", target: NSNull()),
@@ -244,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     } else if let err = errorBanner, now < err.until {
       color = .systemRed
       text = err.text
-      tip = "\(err.text)\nTip: ⇧⌘R Reconnect · ⌥⇧⌘R Hard Reset Tunnel"
+      tip = "\(err.text)\nTip: ⇧⌘R Reset Tunnel"
     } else if mirrorView.paused {
       color = .systemGray
       text = "Locked · ⌘U to unlock"
@@ -257,12 +257,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       let age = now - lastFrameAt
       if age >= 8 {
         color = .systemRed
-        text = String(format: "Stalled %.0fs · ⌥⇧⌘R", age)
-        tip = String(format: "No video frame for %.1fs. Try ⇧⌘R (Reconnect) or ⌥⇧⌘R (Hard Reset Tunnel).", age)
+        text = String(format: "Stalled %.0fs · ⇧⌘R", age)
+        tip = String(format: "No video frame for %.1fs. Press ⇧⌘R to reset the CoreDevice tunnel.", age)
       } else if age >= 2 {
         color = .systemYellow
         text = String(format: "Stalled %.0fs · ⇧⌘R", age)
-        tip = String(format: "No video frame for %.1fs. Waiting for stream or press ⇧⌘R to reconnect.", age)
+        tip = String(format: "No video frame for %.1fs. Waiting for stream or press ⇧⌘R to reset tunnel.", age)
       } else if locked {
         color = .systemGreen
         text = String(format: "Locked · %.0f fps · ⌘U", lastFPS)
@@ -363,21 +363,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
   }
 
-  @objc private func reconnect() {
-    beginOp("Reconnecting…")
-    session.reset()
-    resume()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-      self?.lastFrameAt = 0
-      self?.endOp()
-    }
-  }
-
   @objc private func hardResetTunnel() {
+    guard !isResetting else { return }
+    isResetting = true
     mirrorView.paused = true
     beginOp("Resetting tunnel…")
     session.reset()
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      defer { DispatchQueue.main.async { self?.isResetting = false } }
       // Clear cached lightpinky port/layout files so the next tunnel rediscovers cleanly.
       let runDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".cache/lightpinky/run")
@@ -391,7 +384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
       proc.arguments = [
         "-e",
-        "do shell script \"killall -9 remoted CoreDeviceService 2>/dev/null || true\" with administrator privileges",
+        "do shell script \"/bin/launchctl kickstart -k system/com.apple.remoted; /usr/bin/killall CoreDeviceService 2>/dev/null || true\" with administrator privileges",
       ]
       proc.standardError = errPipe
       do {
