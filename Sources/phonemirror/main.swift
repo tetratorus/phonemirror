@@ -368,9 +368,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     isResetting = true
     mirrorView.paused = true
     beginOp("Resetting tunnel…")
-    session.reset()
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       defer { DispatchQueue.main.async { self?.isResetting = false } }
+      self?.session.resetSync(timeout: 2)
       // Clear cached lightpinky port/layout files so the next tunnel rediscovers cleanly.
       let runDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".cache/lightpinky/run")

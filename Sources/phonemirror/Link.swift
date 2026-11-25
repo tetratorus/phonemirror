@@ -166,6 +166,17 @@ final class PhoneSession {
     }
   }
 
+  /// Waits briefly for clean teardown (closing AX and display sessions) before a tunnel reset.
+  func resetSync(timeout: Double = 2) {
+    let done = DispatchSemaphore(value: 0)
+    queue.async { [weak self] in
+      self?.link?.close()
+      self?.link = nil
+      done.signal()
+    }
+    _ = done.wait(timeout: .now() + timeout)
+  }
+
   func shutdown() {
     locked { stopped = true }
     queue.sync {

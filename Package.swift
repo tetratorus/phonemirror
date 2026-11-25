@@ -6,7 +6,7 @@ let package = Package(
   platforms: [.macOS(.v14)],
   dependencies: [
     .package(url: "https://github.com/tetratorus/lightpinky.git",
-             revision: "3568cd7b4f3877a6781817afb7c089ccbce3668d"),
+             revision: "bb57b0574e3a1a2a8218141e46d1bc1628341285"),
   ],
   targets: [
     .target(name: "PhoneMirrorKit"),
