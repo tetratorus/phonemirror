@@ -172,12 +172,13 @@ final class MirrorView: NSView {
 
   override func keyDown(with event: NSEvent) {
     if paused { return }
-    let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-    if flags == .command {
+    let flags = event.modifierFlags.intersection([.command, .shift, .option, .control, .capsLock])
+    let nonCaps = flags.subtracting(.capsLock)
+    if nonCaps == .command {
       switch event.keyCode {
       case 0x09: onPaste?(); return
       case 0x08, 0x07:
-        if let chord = KeyMap.chord(keyCode: event.keyCode, flags: CGEventFlags(rawValue: UInt64(flags.rawValue))) {
+        if let chord = KeyMap.chord(keyCode: event.keyCode, flags: CGEventFlags(rawValue: UInt64(nonCaps.rawValue))) {
           onCopy?(chord)
         }
         return

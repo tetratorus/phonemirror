@@ -12,6 +12,13 @@ final class KeyMapTests: XCTestCase {
     XCTAssertNil(KeyMap.chord(keyCode: 0x3f, flags: []))                           // fn
   }
 
+  func testCapsLockAppliesOnlyToUnmodifiedLetters() {
+    XCTAssertEqual(KeyMap.chord(keyCode: 0x00, flags: .maskAlphaShift), [0xe1, 0x04])              // Caps + a -> A
+    XCTAssertEqual(KeyMap.chord(keyCode: 0x00, flags: [.maskAlphaShift, .maskShift]), [0x04])      // Caps + Shift + a -> a
+    XCTAssertEqual(KeyMap.chord(keyCode: 0x1d, flags: .maskAlphaShift), [0x27])                    // Caps + 0 -> 0
+    XCTAssertEqual(KeyMap.chord(keyCode: 0x08, flags: [.maskAlphaShift, .maskCommand]), [0xe3, 0x06]) // Caps + ⌘C -> ⌘C
+  }
+
   func testEveryUsageIsDistinctAndBelowModifiers() {
     let values = Array(KeyMap.usages.values)
     XCTAssertEqual(Set(values).count, values.count)

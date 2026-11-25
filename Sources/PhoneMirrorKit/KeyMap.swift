@@ -33,9 +33,13 @@ public enum KeyMap {
   /// The HID chord for a key press, modifiers first; nil for keys a phone keyboard lacks.
   public static func chord(keyCode: UInt16, flags: CGEventFlags) -> [UInt8]? {
     guard let usage = usages[keyCode] else { return nil }
+    let isLetter = (0x04...0x1d).contains(usage)
+    let hasCmdOrCtrl = flags.contains(.maskCommand) || flags.contains(.maskControl)
+    let capsApplies = isLetter && !hasCmdOrCtrl && flags.contains(.maskAlphaShift)
+    let shifted = flags.contains(.maskShift) != capsApplies
     var chord: [UInt8] = []
     if flags.contains(.maskControl) { chord.append(control) }
-    if flags.contains(.maskShift) { chord.append(shift) }
+    if shifted { chord.append(shift) }
     if flags.contains(.maskAlternate) { chord.append(option) }
     if flags.contains(.maskCommand) { chord.append(command) }
     return chord + [usage]
